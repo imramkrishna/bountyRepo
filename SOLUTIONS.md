@@ -1,12 +1,12 @@
 # Solutions Guide for Instructors 🔑
 
-This document outlines all the intentional issues in the codebase and their solutions.
+This document outlines the 8 major conceptual issues and their solutions.
 
 ## 🚨 Issues and Solutions
 
-### 1. **index.js Issues**
+### 1. **Middleware Order Problem** (index.js)
 
-#### Issue: Middleware Order
+#### Issue: CORS middleware applied after JSON parsing
 ```javascript
 // WRONG
 app.use(express.json());
@@ -17,7 +17,9 @@ app.use(cors());
 app.use(express.json());
 ```
 
-#### Issue: Hardcoded MongoDB URL
+### 2. **Hardcoded Database Configuration** (index.js, config.js)
+
+#### Issue: MongoDB URL and secrets hardcoded
 ```javascript
 // WRONG
 const mongoUrl = "mongodb://localhost:27017/studentpractice";
@@ -26,30 +28,55 @@ const mongoUrl = "mongodb://localhost:27017/studentpractice";
 const mongoUrl = process.env.MONGODB_URL || "mongodb://localhost:27017/studentpractice";
 ```
 
-#### Issue: Missing Error Handling Middleware
+### 3. **Missing Global Error Handling** (index.js)
+
+#### Issue: No global error handling middleware
 ```javascript
-// ADD THIS
+// ADD THIS at the end before app.listen()
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ message: 'Something went wrong!' });
+  res.status(500).json({ 
+    message: 'Something went wrong!',
+    ...(process.env.NODE_ENV === 'development' && { error: err.message })
+  });
 });
 ```
 
-#### Issue: Missing Route Prefixes
-```javascript
-// WRONG
-app.use(userRoutes);
-app.use(authRoutes);
+### 4. **Incomplete Authentication Middleware** (middlewares/auth.js)
 
-// CORRECT
-app.use('/api/auth', authRoutes);
-app.use('/api', userRoutes);
+#### Issue: Missing error handling and token validation
+```javascript
+// CORRECT VERSION
+const authMiddleware = (req, res, next) => {
+  try {
+    const authHeader = req.header('Authorization');
+    
+    if (!authHeader) {
+      return res.status(401).json({ message: 'No token provided' });
+    }
+    
+    const token = authHeader.startsWith('Bearer ') 
+      ? authHeader.slice(7) 
+      : authHeader;
+    
+    if (!token) {
+      return res.status(401).json({ message: 'Invalid token format' });
+    }
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: 'Token is not valid' });
+  }
+};
 ```
 
-### 2. **User Model Issues**
+### 5. **Inadequate Schema Validation** (models/User.js)
 
-#### Issue: Missing Validation
+#### Issue: Missing validation constraints
 ```javascript
+// CORRECT VERSION
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
@@ -90,54 +117,11 @@ const userSchema = new mongoose.Schema({
 });
 ```
 
-#### Issue: Missing Password Hashing Middleware
+### 6. **Missing Input Validation** (middlewares/validation.js)
+
+#### Issue: Incomplete validation logic
 ```javascript
-userSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) return next();
-  
-  try {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
-```
-
-### 3. **Authentication Middleware Issues**
-
-#### Issue: Missing Token Validation
-```javascript
-const authMiddleware = (req, res, next) => {
-  try {
-    const authHeader = req.header('Authorization');
-    
-    if (!authHeader) {
-      return res.status(401).json({ message: 'No token provided' });
-    }
-    
-    const token = authHeader.startsWith('Bearer ') 
-      ? authHeader.slice(7) 
-      : authHeader;
-    
-    if (!token) {
-      return res.status(401).json({ message: 'Invalid token format' });
-    }
-    
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (error) {
-    return res.status(401).json({ message: 'Token is not valid' });
-  }
-};
-```
-
-### 4. **Validation Middleware Issues**
-
-#### Issue: Incomplete Validation
-```javascript
+// CORRECT VERSION
 const validateUser = (req, res, next) => {
   const { username, email, password } = req.body;
   const errors = [];
@@ -177,39 +161,11 @@ const validateLogin = (req, res, next) => {
 };
 ```
 
-### 5. **User Routes Issues**
+### 7. **Insecure Authentication Flow** (routes/authRoutes.js)
 
-#### Issue: Missing Pagination and Security
+#### Issue: Missing user checks and data exposure
 ```javascript
-router.get('/users', authMiddleware, async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-    
-    const users = await User.find()
-      .select('-password') // Exclude password
-      .skip(skip)
-      .limit(limit);
-      
-    const total = await User.countDocuments();
-    
-    res.json({
-      users,
-      currentPage: page,
-      totalPages: Math.ceil(total / limit),
-      totalUsers: total
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-```
-
-### 6. **Auth Routes Issues**
-
-#### Issue: Missing User Existence Check
-```javascript
+// CORRECT REGISTER
 router.post('/register', validateUser, async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -240,10 +196,8 @@ router.post('/register', validateUser, async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
-```
 
-#### Issue: JWT and Login Issues
-```javascript
+// CORRECT LOGIN
 router.post('/login', validateLogin, async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -263,7 +217,7 @@ router.post('/login', validateLogin, async (req, res) => {
     const token = jwt.sign(
       { userId: user._id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || '7d' }
+      { expiresIn: '7d' }
     );
     
     // Don't return password
@@ -281,16 +235,53 @@ router.post('/login', validateLogin, async (req, res) => {
 });
 ```
 
-## 📊 Difficulty Levels
+### 8. **Missing Route Protection** (routes/userRoutes.js)
 
-- **🟢 Beginner (1-2)**: Basic fixes like hardcoded values, missing required fields
-- **🟡 Intermediate (3-4)**: Middleware issues, validation logic, error handling
-- **🔴 Advanced (5-6)**: Security issues, proper authentication flow, database optimization
+#### Issue: No authentication on sensitive endpoints
+```javascript
+// CORRECT VERSION with authentication
+router.get('/users', authMiddleware, async (req, res) => {
+  try {
+    const users = await User.find().select('-password');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
-## 🎯 Assessment Criteria
+router.delete('/users/:id', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Check if user can delete (authorization)
+    if (req.user.userId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+    
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+```
 
-- **Code Quality**: Clean, readable, and well-structured code
-- **Security**: Proper handling of sensitive data and authentication
-- **Error Handling**: Comprehensive error catching and user-friendly messages
-- **Best Practices**: Following Node.js and Express.js conventions
-- **Testing**: Ability to test the fixes and verify they work correctly
+## 🎯 **Environment Variables Setup**
+
+Create `.env` file:
+```env
+MONGODB_URL=mongodb://localhost:27017/studentpractice
+JWT_SECRET=your_super_secret_jwt_key_here
+NODE_ENV=development
+PORT=3000
+```
+
+## 📊 **Assessment Criteria**
+
+- **🟢 Basic (Issues 1-3)**: Configuration and middleware setup
+- **🟡 Intermediate (Issues 4-6)**: Security and validation implementation  
+- **🔴 Advanced (Issues 7-8)**: Authentication flow and authorization
